@@ -19,6 +19,10 @@ class ThinningDataset(Dataset):
     def __init__(self, root_dir, transform=None):
         self.root_dir = root_dir
         self.transform = transform
+        self.default_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5], std=[0.5]),
+        ])
         self.image_files = sorted([f for f in os.listdir(root_dir) if f.startswith("image_") and f.endswith(".png")])
         self.target_files = sorted([f for f in os.listdir(root_dir) if f.startswith("target_") and f.endswith(".png") and f.replace("target_", "image_") in self.image_files])
 
@@ -30,14 +34,15 @@ class ThinningDataset(Dataset):
         tgt_path = os.path.join(self.root_dir, self.target_files[idx])
         image = Image.open(img_path).convert("L")
         target = Image.open(tgt_path).convert("L")
-
-        transform = self.transform or transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5], std=[0.5]),
-        ])
         
-        image = transform(image)
-        target = transform(target)
+        if self.transform:
+            self.default_transform = transforms.Compose([
+                self.transform,
+                self.default_transform
+            ])
+
+        image = self.default_transform(image)
+        target = self.default_transform(target)
 
         return image, target, img_path, tgt_path
 
@@ -87,6 +92,23 @@ class UNet(nn.Module):
         d1 = self.upconv1(d2)
         d1 = self.dec1(torch.cat([d1, e1], dim=1))
         return torch.sigmoid(self.final(d1))
+    
+def load_datsets(data_dir, transform_train=None, test_split=0.2):
+    full_dataset = ThinningDataset(data_dir, transform=None)
+
+    val_size = int(test_split * len(full_dataset))
+    train_size = len(full_dataset) - val_size
+    indices = torch.randperm(len(full_dataset)).tolist()
+    train_indices, val_indices = indices[:train_size], indices[train_size:]
+
+    train_dataset = torch.utils.data.Subset(ThinningDataset(data_dir, transform=transform_train), train_indices)
+    val_dataset = torch.utils.data.Subset(ThinningDataset(data_dir), val_indices)
+
+    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
+
+    return train_loader, val_loader
+
 
 def train_model(model, train_loader, device, epochs=1, lr=1e-4):
     model.to(device)
@@ -236,7 +258,7 @@ def qualitative_and_quantitative_evaluation(model, val_loader, device, num_visua
     plt.show()
 
     # Print quantitative metrics
-    print("\n📊 Quantitative Evaluation:")
+    print("\n Quantitative Evaluation:")
     print(f"Test Loss (BCE): {total_loss / len(val_loader):.4f}")
     print(f"Dice Coefficient: {np.mean(dice_scores):.4f}")
     print(f"MSE (from distance transform): {np.mean(mse_scores):.4f}")
@@ -258,22 +280,11 @@ def run_pipeline(data_dir="thinning_data/data/thinning"):
         transforms.RandomRotation(degrees=10),
         transforms.RandomAffine(degrees=0, translate=(0.05, 0.05)),
         transforms.GaussianBlur(kernel_size=3),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomVerticalFlip(),
     ])
 
-    # Manual dataset split
-    full_dataset = ThinningDataset(data_dir, transform=None)
-    val_size = int(0.2 * len(full_dataset))
-    train_size = len(full_dataset) - val_size
-    indices = torch.randperm(len(full_dataset)).tolist()
-    train_indices, val_indices = indices[:train_size], indices[train_size:]
+    # Load datasets
+    train_loader, val_loader = load_datsets(data_dir, transform_train=transform_train)
 
-    train_dataset = torch.utils.data.Subset(ThinningDataset(data_dir, transform=transform_train), train_indices)
-    val_dataset = torch.utils.data.Subset(ThinningDataset(data_dir), val_indices)
-
-    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     model = UNet()
