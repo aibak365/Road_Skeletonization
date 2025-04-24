@@ -252,6 +252,7 @@ def qualitative_and_quantitative_evaluation(model, val_loader, device, num_visua
     }
 
 def run_pipeline(data_dir="thinning_data/data/thinning"):
+    
     # Define transforms
     transform_train = transforms.Compose([
         transforms.RandomRotation(degrees=10),
@@ -259,13 +260,6 @@ def run_pipeline(data_dir="thinning_data/data/thinning"):
         transforms.GaussianBlur(kernel_size=3),
         transforms.RandomHorizontalFlip(),
         transforms.RandomVerticalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5], std=[0.5]),
-    ])
-
-    transform_test = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5], std=[0.5]),
     ])
 
     # Manual dataset split
@@ -276,7 +270,7 @@ def run_pipeline(data_dir="thinning_data/data/thinning"):
     train_indices, val_indices = indices[:train_size], indices[train_size:]
 
     train_dataset = torch.utils.data.Subset(ThinningDataset(data_dir, transform=transform_train), train_indices)
-    val_dataset = torch.utils.data.Subset(ThinningDataset(data_dir, transform=transform_test), val_indices)
+    val_dataset = torch.utils.data.Subset(ThinningDataset(data_dir), val_indices)
 
     train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
