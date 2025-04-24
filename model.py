@@ -19,10 +19,6 @@ class ThinningDataset(Dataset):
     def __init__(self, root_dir, transform=None):
         self.root_dir = root_dir
         self.transform = transform
-        self.default_transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5], std=[0.5]),
-        ])
         self.image_files = sorted([f for f in os.listdir(root_dir) if f.startswith("image_") and f.endswith(".png")])
         self.target_files = sorted([f for f in os.listdir(root_dir) if f.startswith("target_") and f.endswith(".png") and f.replace("target_", "image_") in self.image_files])
 
@@ -35,14 +31,13 @@ class ThinningDataset(Dataset):
         image = Image.open(img_path).convert("L")
         target = Image.open(tgt_path).convert("L")
         
+        # added transform
         if self.transform:
-            self.default_transform = transforms.Compose([
-                self.transform,
-                self.default_transform
-            ])
-
-        image = self.default_transform(image)
-        target = self.default_transform(target)
+            image = self.transform(image)
+            target = self.transform(target)
+        else:
+            image = transforms.ToTensor()(image)
+            target = transforms.ToTensor()(target)
 
         return image, target, img_path, tgt_path
 
@@ -93,7 +88,21 @@ class UNet(nn.Module):
         d1 = self.dec1(torch.cat([d1, e1], dim=1))
         return torch.sigmoid(self.final(d1))
     
-def load_datsets(data_dir, transform_train=None, test_split=0.2):
+def load_datsets(data_dir, test_split=0.2):
+
+    transform_train = transforms.Compose([
+        transforms.RandomRotation(degrees=10),
+        transforms.RandomAffine(degrees=0, translate=(0.05, 0.05)),
+        transforms.GaussianBlur(kernel_size=3),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5], std=[0.5]),
+    ])
+
+    transforms_test = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5], std=[0.5]),
+    ])
+
     full_dataset = ThinningDataset(data_dir, transform=None)
 
     val_size = int(test_split * len(full_dataset))
@@ -102,7 +111,7 @@ def load_datsets(data_dir, transform_train=None, test_split=0.2):
     train_indices, val_indices = indices[:train_size], indices[train_size:]
 
     train_dataset = torch.utils.data.Subset(ThinningDataset(data_dir, transform=transform_train), train_indices)
-    val_dataset = torch.utils.data.Subset(ThinningDataset(data_dir), val_indices)
+    val_dataset = torch.utils.data.Subset(ThinningDataset(data_dir, transform=transforms_test), val_indices)
 
     train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
@@ -274,23 +283,16 @@ def qualitative_and_quantitative_evaluation(model, val_loader, device, num_visua
     }
 
 def run_pipeline(data_dir="thinning_data/data/thinning"):
-    
-    # Define transforms
-    transform_train = transforms.Compose([
-        transforms.RandomRotation(degrees=10),
-        transforms.RandomAffine(degrees=0, translate=(0.05, 0.05)),
-        transforms.GaussianBlur(kernel_size=3),
-    ])
 
     # Load datasets
-    train_loader, val_loader = load_datsets(data_dir, transform_train=transform_train)
+    train_loader, val_loader = load_datsets(data_dir)
 
 
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     model = UNet()
 
     # Train model
-    train_model(model, train_loader, device)
+    train_model(model, train_loader, device, epochs=10, lr=1e-4)
 
     # Load trained model and evaluate
     model.load_state_dict(torch.load("unet_skeleton.pth", map_location=device))
