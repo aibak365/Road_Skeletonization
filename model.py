@@ -88,6 +88,10 @@ class UNet(nn.Module):
         d1 = self.dec1(torch.cat([d1, e1], dim=1))
         return torch.sigmoid(self.final(d1))
     
+class MinMaxNormalize:
+    def __call__(self, tensor):
+        return (tensor - tensor.min()) / (tensor.max() - tensor.min() + 1e-8)
+    
 def load_datsets(data_dir, test_split=0.2):
 
     transform_train = transforms.Compose([
@@ -95,12 +99,12 @@ def load_datsets(data_dir, test_split=0.2):
         transforms.RandomAffine(degrees=0, translate=(0.05, 0.05)),
         transforms.GaussianBlur(kernel_size=3),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5], std=[0.5]),
+        MinMaxNormalize(),
     ])
 
     transforms_test = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5], std=[0.5]),
+        MinMaxNormalize(),
     ])
 
     full_dataset = ThinningDataset(data_dir, transform=None)
@@ -113,7 +117,7 @@ def load_datsets(data_dir, test_split=0.2):
     train_dataset = torch.utils.data.Subset(ThinningDataset(data_dir, transform=transform_train), train_indices)
     val_dataset = torch.utils.data.Subset(ThinningDataset(data_dir, transform=transforms_test), val_indices)
 
-    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
 
     return train_loader, val_loader
@@ -292,7 +296,7 @@ def run_pipeline(data_dir="thinning_data/data/thinning"):
     model = UNet()
 
     # Train model
-    train_model(model, train_loader, device, epochs=10, lr=1e-4)
+    train_model(model, train_loader, device, epochs=100, lr=1e-4)
 
     # Load trained model and evaluate
     model.load_state_dict(torch.load("unet_skeleton.pth", map_location=device))
@@ -301,7 +305,7 @@ def run_pipeline(data_dir="thinning_data/data/thinning"):
     predictions = predict_on_loader(model, val_loader, device, num_samples=5)
     visualize_predictions(predictions)
 
-    results = qualitative_and_quantitative_evaluation(model, val_loader, device, num_visuals=5)
+#     results = qualitative_and_quantitative_evaluation(model, val_loader, device, num_visuals=5)
 
 if __name__ == "__main__":
     run_pipeline()
