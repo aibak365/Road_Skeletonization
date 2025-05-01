@@ -6,9 +6,14 @@ from torchvision import transforms
 import numpy as np
 import matplotlib.pyplot as plt
 import os
-from sklearn.metrics import precision_score, recall_score, f1_score
+from sklearn.metrics import jaccard_score, precision_score, recall_score, f1_score
 from dataset_preperation import RoadSkeletonDataset
-from sklearn.metrics import jaccard_score
+from torch.utils.data import random_split
+from torch.utils.data import DataLoader
+import torch
+import numpy as np
+from scipy.ndimage import distance_transform_edt, convolve
+from scipy.spatial.distance import cdist
 class DoubleConv(nn.Module):
     """(convolution => [BN] => ReLU) * 2"""
     def __init__(self, in_channels, out_channels):
@@ -176,6 +181,8 @@ def calculate_metrics(preds, targets, threshold=0.5):
     }
 
 # 5. Evaluation Script
+"""
+
 def evaluate_model(test_loader, model, config):
     model.eval()
     all_preds = []
@@ -205,6 +212,112 @@ def evaluate_model(test_loader, model, config):
         'recall': recall_score(targets_flat, preds_flat),
         'f1': f1_score(targets_flat, preds_flat)
     }
+"""
+def compute_mse_distance_transform(pred, target):
+    pred_bin = (pred > 0.5).astype(np.uint8)
+    target_bin = (target > 0.5).astype(np.uint8)
+    print(pred_bin)
+    dist_transform = distance_transform_edt(1 - target_bin)
+    mse = np.mean((pred_bin * dist_transform) ** 2)
+    return mse
+
+def compute_valence_map(skeleton):
+    kernel = np.array([[1, 1, 1],
+                       [1, 0, 1],
+                       [1, 1, 1]])
+    return convolve(skeleton.astype(np.uint8), kernel, mode='constant')
+
+def extract_nodes_by_valence(skeleton, valence):
+    valence_map = compute_valence_map(skeleton)
+    return np.argwhere((skeleton > 0) & (valence_map == valence))
+
+def match_nodes(pred_nodes, gt_nodes, tolerance=3):
+    if len(pred_nodes) == 0 or len(gt_nodes) == 0:
+        return 0, 0, 0
+    dists = cdist(pred_nodes, gt_nodes)
+    matched_pred = set()
+    matched_gt = set()
+    for i, row in enumerate(dists):
+        for j, dist in enumerate(row):
+            if dist <= tolerance and j not in matched_gt and i not in matched_pred:
+                matched_pred.add(i)
+                matched_gt.add(j)
+                break
+    tp = len(matched_pred)
+    fp = len(pred_nodes) - tp
+    fn = len(gt_nodes) - tp
+    return tp, fp, fn
+
+def evaluate_node_precision_recall(pred_skeleton, gt_skeleton):
+    results = {}
+    for v in [1, 2, 3, 4]:
+        pred_nodes = extract_nodes_by_valence(pred_skeleton, v)
+        gt_nodes = extract_nodes_by_valence(gt_skeleton, v)
+        tp, fp, fn = match_nodes(pred_nodes, gt_nodes)
+        precision = tp / (tp + fp + 1e-8)
+        recall = tp / (tp + fn + 1e-8)
+        results[f'valence_{v}_precision'] = precision
+        results[f'valence_{v}_recall'] = recall
+    return results
+
+def compute_iou_and_dice(pred, target, threshold=0.5):
+    pred_bin = (pred > threshold).astype(np.uint8)
+    target_bin = (target > threshold).astype(np.uint8)
+    intersection = np.logical_and(pred_bin, target_bin).sum()
+    union = np.logical_or(pred_bin, target_bin).sum()
+    dice = 2. * intersection / (pred_bin.sum() + target_bin.sum() + 1e-8)
+    iou = intersection / (union + 1e-8)
+    return iou, dice
+
+def evaluate_model(test_loader, model, config):
+    model.eval()
+    total_loss = 0
+    total_mse = 0
+    total_iou = 0
+    total_dice = 0
+    valence_metrics_sum = {f'valence_{v}_precision': 0 for v in range(1, 5)}
+    valence_metrics_sum.update({f'valence_{v}_recall': 0 for v in range(1, 5)})
+    count = 0
+
+    criterion = torch.nn.BCEWithLogitsLoss()
+
+    with torch.no_grad():
+        for batch in test_loader:
+            inputs = batch['input'].float().to(config.device)
+            targets = batch['target'].float().to(config.device)
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
+            total_loss += loss.item()
+
+            preds = torch.sigmoid(outputs).cpu().numpy()
+            targets_np = targets.cpu().numpy()
+            
+            for i in range(inputs.shape[0]):
+
+                pred = preds[i, 0]
+                target = targets_np[i, 0]
+                mse = compute_mse_distance_transform(pred, target)
+                valence_metrics = evaluate_node_precision_recall(pred > config.threshold, target > config.threshold)
+                iou, dice = compute_iou_and_dice(pred, target, threshold=config.threshold)
+
+                total_mse += mse
+                total_iou += iou
+                total_dice += dice
+                for k in valence_metrics:
+                    valence_metrics_sum[k] += valence_metrics[k]
+
+                count += 1
+
+    metrics = {
+        'test_loss': total_loss / len(test_loader),
+        'mse': total_mse / count,
+        'iou': total_iou / count,
+        'dice': total_dice / count,
+    }
+    for k in valence_metrics_sum:
+        metrics[k] = valence_metrics_sum[k] / count
+
+    return metrics
 
 # 6. Main Execution
 if __name__ == "__main__":
@@ -213,20 +326,23 @@ if __name__ == "__main__":
         transforms.ToTensor(),
     ])
     
-    train_dataset = RoadSkeletonDataset(
+    dataset = RoadSkeletonDataset(
         thinning_dir='/home/aljadaaa/Documents/skelnton/Road_Skeletonization/thinning_data/data/thinning',
         target_png_dir='/home/aljadaaa/Documents/skelnton/Road_Skeletonization/thinning_data/data/targets_png',
         geojson_dir = '/home/aljadaaa/Documents/skelnton/Road_Skeletonization/thinning_data/data/targets_geojson',
         transform=transform
     )
-    
-    val_dataset = RoadSkeletonDataset(
-        thinning_dir='/home/aljadaaa/Documents/skelnton/Road_Skeletonization/thinning_data/data/thinning',
-        target_png_dir='/home/aljadaaa/Documents/skelnton/Road_Skeletonization/thinning_data/data/targets_png',
-        geojson_dir = '/home/aljadaaa/Documents/skelnton/Road_Skeletonization/thinning_data/data/targets_geojson',
-        transform=transform
+
+    total_size = len(dataset)
+    train_ratio = 0.7
+    val_ratio = 0.15
+    test_ratio = 0.15
+    train_size = int(train_ratio * total_size)
+    val_size = int(val_ratio * total_size)
+    test_size = total_size - train_size - val_size
+    train_dataset, val_dataset, test_dataset = random_split(
+    dataset, [train_size, val_size, test_size]
     )
-    
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size)
     
@@ -236,8 +352,8 @@ if __name__ == "__main__":
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
     
     # Train
-    train_losses, val_losses = train_model(train_loader, val_loader, model, criterion, optimizer, config)
-    
+    #train_losses, val_losses = train_model(train_loader, val_loader, model, criterion, optimizer, config)
+    """
     # Plot training curves
     plt.figure(figsize=(10, 5))
     plt.plot(train_losses, label='Train Loss')
@@ -247,19 +363,18 @@ if __name__ == "__main__":
     plt.ylabel('Loss')
     plt.legend()
     plt.show()
+    """
     
     # Evaluate
-    test_dataset = RoadSkeletonDataset(
-        thinning_dir='path/to/test_thinning',
-        target_png_dir='path/to/test_targets',
-        transform=transform
-    )
+    model.load_state_dict(torch.load("unet_skeleton.pth", map_location=config.device))
+    model.eval()
     test_loader = DataLoader(test_dataset, batch_size=config.batch_size)
     
     metrics = evaluate_model(test_loader, model, config)
     print("\nTest Metrics:")
     for k, v in metrics.items():
         print(f"{k}: {v:.4f}")
+    
     
     # Save predictions visual
     sample = test_dataset[0]
